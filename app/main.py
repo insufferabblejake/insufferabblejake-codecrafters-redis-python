@@ -1,15 +1,21 @@
 import socket
-# TODO add simple logging levels
-
 
 HOST = "localhost"
 PORT = 6379
 
 
-def make_simple_string(s: str) -> str:
-    # given a regular string, make it a simple string that follows
-    # the redis protocol
-    return f"+{s}\r\n"
+class RedisUtils:
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def make_redis_simple_string(s: str) -> str:
+        return f"+{s}\r\n"
+
+    @staticmethod
+    def extract_command(data_list):
+        # TODO this will have to parse the list
+        return data_list[2]
 
 
 class RedisServer:
@@ -24,21 +30,25 @@ class RedisServer:
             while True:
                 self.connection, self.addr = server.accept()
                 self.handle_single_connection()
-                self.connection = None
+                self.connection, self.addr = None, None
 
     def handle_single_connection(self):
+        print(f"Connected to by {self.addr[0]}:{self.addr[1]}")
         with self.connection:
-            print(f"Connected by {self.addr[0]}:{self.addr[1]}")
-            response = make_simple_string("PONG").encode()
-            # sendall() blocks and ties to send all the data you have, whereas send() might not.
-            # apparently less error-prone to use sendall()
-            self.connection.sendall(response)
+            while True:
+                data: bytes = self.connection.recv(1024)
+                if not data:
+                    break
+                command: str = RedisUtils.extract_command(data.decode('utf-8').split('\r\n'))
+                print(f"Received command: {command}")
+                match command:
+                    case "ping":
+                        response: str = RedisUtils.make_redis_simple_string("PONG")
+                        print(f"Sending: {response}")
+                self.connection.sendall(response.encode())
 
 
 def main():
-    # You can use print statements as follows for debugging, they'll be
-    # visible when running tests.
-    print("Logs from your program will appear here!")
     server = RedisServer()
     server.start()
 
