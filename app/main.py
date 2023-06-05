@@ -17,14 +17,23 @@ class RequestHandler(socketserver.StreamRequestHandler):
 
     def handle(self):
         # handle a single connection, which might send multiple commands
+        response = ""
+        # TODO this is the worlds worst parser!! Implement a proper one. But
+        # at least I understand what's going on.
+        flag = False
         while True:
-            data = self.rfile.readline().splitlines()
-            if data is None or data == []:
+            data = self.rfile.readline().rstrip()
+            if data is None:
                 break
-            print(f"{self.client_address} wrote: {data}")
-            if b'ping' in data:
+            print(f"{self.client_address} wrote: {data} and {len(data)}")
+            if data == b'ping':
                 response = Protocol.make_redis_simple_string("PONG")
-                self.wfile.write(response.encode())
+            if data == b'echo':
+                flag = True
+                continue
+            if flag and data.decode().isalpha():
+                response = Protocol.make_redis_simple_string(data.decode())
+            self.wfile.write(response.encode())
 
     def execute_command_get_response(self, command, data):
         print(f"Received command {command} on {data.addr}")
