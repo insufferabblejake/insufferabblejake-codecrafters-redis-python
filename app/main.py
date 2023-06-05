@@ -19,7 +19,7 @@ class RequestHandler(socketserver.StreamRequestHandler):
         # handle a single connection, which might send multiple commands
         while True:
             data = self.rfile.readline().splitlines()
-            if data is None:
+            if data is None or data == []:
                 break
             print(f"{self.client_address} wrote: {data}")
             if b'ping' in data:
