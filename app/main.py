@@ -40,6 +40,14 @@ class Protocol:
     def __init__(self):
         pass
 
+    @staticmethod
+    def make_redis_simple_string(s: str) -> str:
+        return f"+{s}\r\n"
+
+    @staticmethod
+    def get_redis_null_string() -> str:
+        return "$-1\r\n"
+
     def handle_request(self, socket_file: IO):
         header_byte = socket_file.read(FIRST_BYTE)
         if not header_byte:
@@ -69,13 +77,9 @@ class Protocol:
 
     def handle_array(self, socket_file: IO) -> List:
         logger.debug(f"In {self.handle_array.__name__}")
-        len_str = socket_file.readline().rstrip()
-        array_len = int(len_str)
+        array_len = int(socket_file.readline().rstrip())
         logger.debug(f"Got array of len {array_len}")
-        data = []
-        for _ in range(array_len):
-            data.append(self.handle_request(socket_file))
-        return data
+        return [self.handle_request(socket_file) for _ in range(array_len)]
 
     def handle_simple_string(self):
         logger.debug(f"{self.handle_simple_string.__name__}")
@@ -90,41 +94,17 @@ class Protocol:
 
     def handle_error(self):
         logger.debug(f"{self.handle_error.__name__}")
+        raise NotImplemented
 
     def handle_integer(self):
         logger.debug(f"{self.handle_integer.__name__}")
-
-    @staticmethod
-    def make_redis_simple_string(s: str) -> str:
-        return f"+{s}\r\n"
-
-    @staticmethod
-    def get_redis_null_string() -> str:
-        return "$-1\r\n"
+        raise NotImplemented
 
 
 class RequestHandler(socketserver.StreamRequestHandler):
     def __init__(self, request, client_address, rserver):
         self._protocol = Protocol()
         super().__init__(request, client_address, rserver)
-
-    def handle(self):
-        logger.debug(f"In handler {self.client_address}")
-        while True:
-            try:
-                data = self._protocol.handle_request(self.rfile)
-            except Disconnect:
-                print(f"Client went away ")
-                break
-
-            try:
-                if not isinstance(data, list) and not isinstance(data, str):
-                    raise CommandError(f"Parsing Error {data}")
-                resp = self.execute_command_get_response(data)
-            except CommandError:
-                raise CommandError("Unknown or unimplemented")
-
-            self.wfile.write(resp.encode())
 
     @staticmethod
     def _exec_ping() -> str:
@@ -171,6 +151,24 @@ class RequestHandler(socketserver.StreamRequestHandler):
                 response = Protocol.get_redis_null_string()
                 del Store[key]
         return response
+
+    def handle(self):
+        logger.debug(f"In handler {self.client_address}")
+        while True:
+            try:
+                data = self._protocol.handle_request(self.rfile)
+            except Disconnect:
+                print(f"Client went away")
+                break
+
+            try:
+                if not isinstance(data, list) and not isinstance(data, str):
+                    raise CommandError(f"Parsing Error {data}")
+                resp = self.execute_command_get_response(data)
+            except CommandError:
+                raise CommandError("Unknown or unimplemented")
+
+            self.wfile.write(resp.encode())
 
     def execute_command_get_response(self, data: List | str) -> str:
         if not isinstance(data, list):
