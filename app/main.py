@@ -1,14 +1,17 @@
 import socketserver
-import typing
-from typing import Callable
+from typing import Callable, IO, List, Dict
 import logging
 
 logger = logging.getLogger(__name__)
 
 HOST = "localhost"
 LISTEN_PORT = 6379
+FIRST_BYTE = 1
+UTF = 'utf-8'
+REDIS_DELIMITER_LEN = 2
+REDIS_DELIMITER = "\r\n"
 
-Store: typing.Dict[str, str] = {}
+Store: Dict[str, str] = {}
 
 
 class Disconnect(Exception):
@@ -23,12 +26,12 @@ class Protocol:
     def __init__(self):
         pass
 
-    def handle_request(self, socket_file: typing.IO):
-        header_byte = socket_file.read(1)
+    def handle_request(self, socket_file: IO):
+        header_byte = socket_file.read(FIRST_BYTE)
         if not header_byte:
             raise Disconnect
         try:
-            header = header_byte.decode('utf-8')
+            header = header_byte.decode(UTF)
             logger.debug(f"Got header_byte: {header_byte}")
             handler = self.get_handlers(header)
             return handler(socket_file)
@@ -50,7 +53,7 @@ class Protocol:
             case _:
                 raise CommandError()
 
-    def handle_array(self, socket_file: typing.IO) -> typing.List:
+    def handle_array(self, socket_file: IO) -> List:
         logger.debug(f"In {self.handle_array.__name__}")
         len_str = socket_file.readline().rstrip()
         array_len = int(len_str)
@@ -63,12 +66,13 @@ class Protocol:
     def handle_simple_string(self):
         logger.debug(f"{self.handle_simple_string.__name__}")
 
-    def handle_string(self, socket_file: typing.IO) -> str:
+    def handle_string(self, socket_file: IO) -> str:
         logger.debug(f"{self.handle_string.__name__}")
         length = int(socket_file.readline().rstrip())
         logger.debug(f"Got string of len {length}")
+        length += REDIS_DELIMITER_LEN
         # read length string, including the ending \r\n
-        return socket_file.read(length + 2)[:-2].decode('utf-8')
+        return socket_file.read(length)[:-REDIS_DELIMITER_LEN].decode(UTF)
 
     def handle_error(self):
         logger.debug(f"{self.handle_error.__name__}")
@@ -96,28 +100,46 @@ class RequestHandler(socketserver.StreamRequestHandler):
                 break
 
             try:
+                if not isinstance(data, list) and not isinstance(data, str):
+                    raise CommandError(f"Parsing Error {data}")
                 resp = self.execute_command_get_response(data)
             except CommandError:
                 raise CommandError("Unknown or unimplemented")
 
             self.wfile.write(resp.encode())
 
-    def execute_command_get_response(self, data: typing.List | str) -> str:
+    def execute_command_get_response(self, data: List | str) -> str:
         if not isinstance(data, list):
             data = data.split()
         logger.debug(f"In {self.execute_command_get_response.__name__}, Got data: {data}")
         command = data[0].upper()
-        print(f"Command: {command}")
-        response = ''
+        logger.debug(f"Command: {command}")
+        response: str = ''
         match command:
             case "PING":
-                response: str = Protocol.make_redis_simple_string("PONG")
+                response = "PONG"
             case "ECHO":
                 echo_data = data[1]
-                response = Protocol.make_redis_simple_string(echo_data.rstrip())
+                response = echo_data.rstrip()
+            case "SET":
+                key = data[1]
+                value = data[2]
+                logger.debug(f"Inserting {key}:{value}")
+                try:
+                    Store[key] = value
+                except Exception:
+                    raise CommandError(f"Unable to insert {key}:{value}")
+                else:
+                    response = "OK"
+            case "GET":
+                key = data[1]
+                try:
+                    response = Store.get(key)
+                except KeyError:
+                    raise CommandError(f"Didn't find {key}")
             case _:
                 raise CommandError
-        return response
+        return Protocol.make_redis_simple_string(response)
 
 
 class Server(socketserver.ThreadingTCPServer):
@@ -126,7 +148,7 @@ class Server(socketserver.ThreadingTCPServer):
 
 def main():
     logger.addHandler(logging.StreamHandler())
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     server = Server((HOST, LISTEN_PORT), RequestHandler)
     try:
         logger.info(f"Serving on {server.server_address}")
