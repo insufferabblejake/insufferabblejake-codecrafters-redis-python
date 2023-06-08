@@ -102,6 +102,7 @@ class Protocol:
     def get_redis_null_string() -> str:
         return "$-1\r\n"
 
+
 class RequestHandler(socketserver.StreamRequestHandler):
     def __init__(self, request, client_address, rserver):
         self._protocol = Protocol()
@@ -125,52 +126,70 @@ class RequestHandler(socketserver.StreamRequestHandler):
 
             self.wfile.write(resp.encode())
 
+    @staticmethod
+    def _exec_ping() -> str:
+        return Protocol.make_redis_simple_string("PONG")
+
+    @staticmethod
+    def _exec_echo(data: str) -> str:
+        return Protocol.make_redis_simple_string(data)
+
+    @staticmethod
+    def _exec_set(data: List) -> str:
+        # set key value px exp
+        key = Key(data[1])
+        val = data[2]
+        expiry_time: float = 0.0
+        if len(data) == 5 and data[3].upper() == "PX":
+            expiry_time = time.time() + float(data[4]) / 1000
+        value = Value(val, expiry_time)
+        logger.debug(f"Inserting {key}:{value}")
+        response: str = ""
+        try:
+            Store[key] = value
+        except Exception:
+            raise CommandError(f"Unable to insert {key}:{value}")
+        else:
+            response = Protocol.make_redis_simple_string("OK")
+        finally:
+            return response
+
+    @staticmethod
+    def _exec_get(data: List) -> str:
+        response: str = ""
+        key = Key(data[1])
+        if key in Store:
+            value: Value = Store.get(key)
+            logger.debug(f"{value}")
+            curr_time: float = time.time()
+            logger.debug(f"Curr time {curr_time}")
+            if value.expiry_time == 0:
+                response = Protocol.make_redis_simple_string(value.value)
+            elif value.expiry_time != 0 and curr_time < value.expiry_time:
+                response = Protocol.make_redis_simple_string(value.value)
+            else:
+                response = Protocol.get_redis_null_string()
+                del Store[key]
+        return response
+
     def execute_command_get_response(self, data: List | str) -> str:
         if not isinstance(data, list):
             data = data.split()
-        logger.info(f"In {self.execute_command_get_response.__name__}, Got data: {data}")
+        logger.debug(f"In {self.execute_command_get_response.__name__}, Got data: {data}")
         command = data[0].upper()
-        logger.info(f"Command: {command}")
+        logger.debug(f"Command: {command}")
         match command:
             case "PING":
-                response = Protocol.make_redis_simple_string("PONG")
+                response = RequestHandler._exec_ping()
             case "ECHO":
-                echo_data = data[1]
-                response = Protocol.make_redis_simple_string(echo_data.rstrip())
+                response = RequestHandler._exec_echo(data[1].rstrip())
             case "SET":
-                # set key value px exp
-                key = Key(data[1])
-                val = data[2]
-                expiry_time: float = 0.0
-                if len(data) == 5 and data[3].upper() == "PX":
-                    expiry_time = time.time() + float(data[4])/1000
-                value = Value(val, expiry_time)
-                logger.info(f"Inserting {key}:{value}")
-                try:
-                    Store[key] = value
-                except Exception:
-                    raise CommandError(f"Unable to insert {key}:{value}")
-                else:
-                    response = Protocol.make_redis_simple_string("OK")
+                response = RequestHandler._exec_set(data)
             case "GET":
-                key = Key(data[1])
-                try:
-                    value: Value = Store.get(key)
-                    logger.info(f"{value}")
-                    curr_time: float = time.time()
-                    logger.info(f"Curr time {curr_time}")
-                    if value.expiry_time == 0:
-                        response = Protocol.make_redis_simple_string(value.value)
-                    elif value.expiry_time != 0 and curr_time < value.expiry_time:
-                        response = Protocol.make_redis_simple_string(value.value)
-                    else:
-                        response = Protocol.get_redis_null_string()
-                        del Store[key]
-                except KeyError:
-                    raise CommandError(f"Didn't find {key}")
+                response = RequestHandler._exec_get(data)
             case _:
                 raise CommandError
-        logger.info(f"Sending response: {response}")
+        logger.debug(f"Sending response: {response}")
         return response
 
 
@@ -182,8 +201,8 @@ def main():
     logger.addHandler(logging.StreamHandler())
     logger.setLevel(logging.INFO)
     server = Server((HOST, LISTEN_PORT), RequestHandler)
+    logger.info(f"Serving on {server.server_address}")
     try:
-        logger.info(f"Serving on {server.server_address}")
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info(f"Shutting down ..")
