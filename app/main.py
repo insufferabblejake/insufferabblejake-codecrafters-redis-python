@@ -1,6 +1,8 @@
+from dataclasses import dataclass
 import socketserver
 from typing import Callable, IO, List, Dict
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +13,19 @@ UTF = 'utf-8'
 REDIS_DELIMITER_LEN = 2
 REDIS_DELIMITER = "\r\n"
 
-Store: Dict[str, str] = {}
+
+@dataclass(frozen=True)
+class Key:
+    key: str
+
+
+@dataclass
+class Value:
+    value: str
+    expiry_time: float
+
+
+Store: Dict[Key, Value] = {}
 
 
 class Disconnect(Exception):
@@ -84,6 +98,9 @@ class Protocol:
     def make_redis_simple_string(s: str) -> str:
         return f"+{s}\r\n"
 
+    @staticmethod
+    def get_redis_null_string() -> str:
+        return "$-1\r\n"
 
 class RequestHandler(socketserver.StreamRequestHandler):
     def __init__(self, request, client_address, rserver):
@@ -111,35 +128,50 @@ class RequestHandler(socketserver.StreamRequestHandler):
     def execute_command_get_response(self, data: List | str) -> str:
         if not isinstance(data, list):
             data = data.split()
-        logger.debug(f"In {self.execute_command_get_response.__name__}, Got data: {data}")
+        logger.info(f"In {self.execute_command_get_response.__name__}, Got data: {data}")
         command = data[0].upper()
-        logger.debug(f"Command: {command}")
-        response: str = ''
+        logger.info(f"Command: {command}")
         match command:
             case "PING":
-                response = "PONG"
+                response = Protocol.make_redis_simple_string("PONG")
             case "ECHO":
                 echo_data = data[1]
-                response = echo_data.rstrip()
+                response = Protocol.make_redis_simple_string(echo_data.rstrip())
             case "SET":
-                key = data[1]
-                value = data[2]
-                logger.debug(f"Inserting {key}:{value}")
+                # set key value px exp
+                key = Key(data[1])
+                val = data[2]
+                expiry_time: float = 0.0
+                if len(data) == 5 and data[3].upper() == "PX":
+                    expiry_time = time.time() + float(data[4])/1000
+                value = Value(val, expiry_time)
+                logger.info(f"Inserting {key}:{value}")
                 try:
                     Store[key] = value
                 except Exception:
                     raise CommandError(f"Unable to insert {key}:{value}")
                 else:
-                    response = "OK"
+                    response = Protocol.make_redis_simple_string("OK")
             case "GET":
-                key = data[1]
+                key = Key(data[1])
                 try:
-                    response = Store.get(key)
+                    value: Value = Store.get(key)
+                    logger.info(f"{value}")
+                    curr_time: float = time.time()
+                    logger.info(f"Curr time {curr_time}")
+                    if value.expiry_time == 0:
+                        response = Protocol.make_redis_simple_string(value.value)
+                    elif value.expiry_time != 0 and curr_time < value.expiry_time:
+                        response = Protocol.make_redis_simple_string(value.value)
+                    else:
+                        response = Protocol.get_redis_null_string()
+                        del Store[key]
                 except KeyError:
                     raise CommandError(f"Didn't find {key}")
             case _:
                 raise CommandError
-        return Protocol.make_redis_simple_string(response)
+        logger.info(f"Sending response: {response}")
+        return response
 
 
 class Server(socketserver.ThreadingTCPServer):
@@ -148,7 +180,7 @@ class Server(socketserver.ThreadingTCPServer):
 
 def main():
     logger.addHandler(logging.StreamHandler())
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     server = Server((HOST, LISTEN_PORT), RequestHandler)
     try:
         logger.info(f"Serving on {server.server_address}")
